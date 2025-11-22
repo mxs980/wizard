@@ -1,0 +1,38 @@
+config wizard 'default'
+	option lan_ipaddr '192.168.55.1'
+	option lan_netmask '255.255.255.0'
+	option wan_proto 'dhcp'
+	option wan_ipaddr ''
+	option wan_netmask ''
+	option wan_gateway ''
+	option wan_dns ''
+	option wan_pppoe_user ''
+	option wan_pppoe_pass ''
+	
+	# General
+	option op_mode 'router'
+	option hostname 'OpenWrt'
+	option timezone_africa_cairo '0'
+	
+	# Wireless
+	option wifi_ssid ''
+	option wifi_key ''
+	option wifi_mode 'standard'
+	option mesh_id ''
+	option mesh_fwding '1'
+	option mesh_rssi_threshold '0'
+
+	# Advanced
+	option firewall_enabled '1'
+	option nat_enabled '1'
+	option hw_offload '1'
+	option sw_offload '0'
+	option tcp_bbr '0'
+	option ipv6_enabled '0'
+	option dns_service 'adguardhome'
+	option cake_autorate '0'
+	option mt6000_tweaks '0'
+	
+	# Node specific
+	option lan_gateway ''
+	option lan_dns ''

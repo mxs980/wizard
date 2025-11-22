@@ -1,0 +1,50 @@
+#!/bin/sh
+
+touch /etc/config/wizard
+
+if ! uci -q get wizard.default >/dev/null; then
+    uci add wizard wizard
+    uci rename wizard.@wizard[-1]='default'
+    
+    # Network Defaults
+    uci set wizard.@wizard[-1].op_mode='router'
+    uci set wizard.@wizard[-1].lan_ipaddr='192.168.55.1'
+    uci set wizard.@wizard[-1].lan_netmask='255.255.255.0'
+    uci set wizard.@wizard[-1].wan_proto='dhcp'
+    
+    # Wireless Defaults
+    uci set wizard.@wizard[-1].wifi_mode='standard'
+    uci set wizard.@wizard[-1].mesh_id='sobhymesh'
+    uci set wizard.@wizard[-1].mesh_fwding='1'
+    uci set wizard.@wizard[-1].mesh_rssi_threshold='0'
+    
+    # Advanced Defaults
+    uci set wizard.@wizard[-1].firewall_enabled='1'
+    uci set wizard.@wizard[-1].nat_enabled='1'
+    uci set wizard.@wizard[-1].hw_offload='1'
+    uci set wizard.@wizard[-1].sw_offload='0'
+    uci set wizard.@wizard[-1].tcp_bbr='0'
+    uci set wizard.@wizard[-1].ipv6_enabled='0'
+    uci set wizard.@wizard[-1].dns_service='adguardhome'
+    uci set wizard.@wizard[-1].cake_autorate='0'
+    uci set wizard.@wizard[-1].mt6000_tweaks='0'
+    
+    # System
+    uci set wizard.@wizard[-1].hostname='OpenWrt'
+    uci set wizard.@wizard[-1].timezone_africa_cairo='0'
+    
+    uci commit wizard
+fi
+
+# Set up ucitrack
+uci -q batch <<-EOF >/dev/null
+    delete ucitrack.@wizard[-1]
+    add ucitrack wizard
+    set ucitrack.@wizard[-1].init=wizard
+    commit ucitrack
+EOF
+
+# Clear Cache
+rm -f /tmp/luci-*cache
+
+exit 0

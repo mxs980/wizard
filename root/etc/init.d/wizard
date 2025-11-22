@@ -1,0 +1,521 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+
+boot() {
+	XBOOT=1 start
+	
+	# Pre-fill logic: if wizard config is empty, grab current system state
+	SSID=$(uci get wireless.@wifi-iface[0].ssid 2>/dev/null)
+	KEY=$(uci get wireless.@wifi-iface[0].key 2>/dev/null)
+	IPADDR=$(uci get network.lan.ipaddr 2>/dev/null)
+	
+	if [ "$(uci get wizard.default.wifi_ssid 2>/dev/null)" = "$SSID" ] && [ "$(uci get wizard.default.lan_ipaddr 2>/dev/null)" = "$IPADDR" ]; then
+		:
+	else
+		uci set wizard.default=wizard
+		uci set wizard.default.wifi_ssid="$SSID"
+		uci set wizard.default.wifi_key="$KEY"
+		uci set wizard.default.lan_ipaddr="$IPADDR"
+		uci commit wizard
+	fi
+}
+
+add_wizard() {
+	[ "x$XBOOT" = "x1" ] && return 0
+	local cfg="$1"
+	
+	local op_mode wifi_mode mt6000_tweaks cake_autorate
+	local wan_proto wan_ipaddr wan_netmask wan_gateway wan_dns wan_pppoe_user wan_pppoe_pass
+	local wifi_ssid wifi_key mesh_id mesh_fwding mesh_rssi_threshold
+	local lan_ipaddr lan_netmask lan_gateway lan_dns
+	local device ifname band
+	local firewall_enabled nat_enabled hw_offload sw_offload tcp_bbr ipv6_enabled dns_service
+	local hostname timezone_africa_cairo
+
+	# Load Wizard Configs
+	config_get op_mode "$cfg" op_mode "router"
+	config_get wifi_mode "$cfg" wifi_mode "standard"
+	
+	config_get mt6000_tweaks "$cfg" mt6000_tweaks 0
+	config_get cake_autorate "$cfg" cake_autorate 0
+	
+	config_get firewall_enabled "$cfg" firewall_enabled 1
+	config_get nat_enabled "$cfg" nat_enabled 1
+	config_get hw_offload "$cfg" hw_offload 1
+	config_get sw_offload "$cfg" sw_offload 0
+	config_get tcp_bbr "$cfg" tcp_bbr 0
+	config_get ipv6_enabled "$cfg" ipv6_enabled 0
+	config_get dns_service "$cfg" dns_service "adguardhome"
+	config_get hostname "$cfg" hostname "OpenWrt"
+	config_get timezone_africa_cairo "$cfg" timezone_africa_cairo 0
+
+	# --- NETWORK CONFIGURATION ---
+	device=$(uci get network.wan.device 2>/dev/null)
+	ifname=$(uci get network.wan.ifname 2>/dev/null)
+
+	if [ "$op_mode" = "router" ]; then
+		# === ROUTER MODE ===
+		uci set dhcp.lan.ignore='0'
+		
+		# WAN Setup
+		config_get wan_proto "$cfg" wan_proto
+		case "${wan_proto}" in
+			dhcp)
+				uci delete network.wan
+				uci set network.wan=interface
+				test -n "$device" && uci set network.wan.device="$device"
+				test -n "$ifname" && uci set network.wan.ifname="$ifname"
+				uci set network.wan.proto='dhcp'
+				uci set network.wan.metric='40'
+				config_get wan_dns "$cfg" wan_dns
+				test -n "${wan_dns}" && {
+					uci set network.wan.peerdns='0'
+					uci set network.wan.dns="${wan_dns}"
+				}
+			;;
+			static)
+				config_get wan_ipaddr "$cfg" wan_ipaddr
+				config_get wan_netmask "$cfg" wan_netmask
+				config_get wan_gateway "$cfg" wan_gateway
+				test -n "${wan_ipaddr}" && test -n "${wan_netmask}" && {
+					uci delete network.wan
+					uci set network.wan=interface
+					uci set network.wan.proto='static'
+					test -n "$device" && uci set network.wan.device="$device"
+					test -n "$ifname" && uci set network.wan.ifname="$ifname"
+					uci set network.wan.metric='40'
+					uci set network.wan.ipaddr="${wan_ipaddr}"
+					uci set network.wan.netmask="${wan_netmask}"
+					uci set network.wan.gateway="${wan_gateway}"
+					config_get wan_dns "$cfg" wan_dns
+					test -n "${wan_dns}" && {
+						uci set network.wan.peerdns='0'
+						uci set network.wan.dns="${wan_dns}"
+					}
+				}
+			;;
+			pppoe)
+				config_get wan_pppoe_user "$cfg" wan_pppoe_user
+				config_get wan_pppoe_pass "$cfg" wan_pppoe_pass
+				uci delete network.wan
+				uci set network.wan=interface
+				uci set network.wan.proto='pppoe'
+				test -n "$device" && uci set network.wan.device="$device"
+				test -n "$ifname" && uci set network.wan.ifname="$ifname"
+				uci set network.wan.metric='40'
+				uci set network.wan.username="${wan_pppoe_user}"
+				uci set network.wan.password="${wan_pppoe_pass}"
+				uci set network.wan.mtu='1492'
+				uci set network.wan.ipv6='auto'
+				config_get wan_dns "$cfg" wan_dns
+				test -n "${wan_dns}" && {
+					uci set network.wan.peerdns='0'
+					uci set network.wan.dns="${wan_dns}"
+				}
+			;;
+		esac
+		
+		if [ "$firewall_enabled" = "1" ]; then
+			/etc/init.d/firewall enable
+		else
+			/etc/init.d/firewall disable
+		fi
+
+	else
+		# === NODE MODE ===
+		uci set dhcp.lan.ignore='1'
+		uci delete network.wan 2>/dev/null
+		
+		# Bridge WAN port to LAN
+		local current_ports=$(uci get network.lan.ports)
+		# Assuming eth1 is WAN, check config
+		echo "$current_ports" | grep -q "eth1" || uci add_list network.lan.ports='eth1'
+		
+		# LAN Gateway/DNS
+		config_get lan_gateway "$cfg" lan_gateway
+		config_get lan_dns "$cfg" lan_dns
+		[ -n "$lan_gateway" ] && uci set network.lan.gateway="$lan_gateway"
+		[ -n "$lan_dns" ] && {
+			uci delete network.lan.dns
+			for d in $lan_dns; do uci add_list network.lan.dns="$d"; done
+		}
+		
+		/etc/init.d/firewall disable
+	fi
+
+	# LAN IP Config
+	config_get lan_ipaddr "$cfg" lan_ipaddr
+	config_get lan_netmask "$cfg" lan_netmask
+	test -n "${lan_ipaddr}" && test -n "${lan_netmask}" && {
+		uci set network.lan.ipaddr="${lan_ipaddr}"
+		uci set network.lan.netmask="${lan_netmask}"
+	}
+
+	uci commit network
+	uci commit dhcp
+
+	# --- WIRELESS CONFIG ---
+	config_get wifi_ssid "$cfg" wifi_ssid
+	config_get wifi_key "$cfg" wifi_key
+	config_get mesh_id "$cfg" mesh_id
+	config_get mesh_fwding "$cfg" mesh_fwding
+	config_get mesh_rssi_threshold "$cfg" mesh_rssi_threshold
+
+	if [ -n "${wifi_ssid}" ]; then
+		# Iterate over all radios (radio0, radio1...)
+		for idx in 0 1 2; do
+			# Get device name (e.g., radio0)
+			device=$(uci get wireless.@wifi-device[$idx].name 2>/dev/null)
+			[ -z "$device" ] && continue
+			
+			band=$(uci get wireless.$device.band 2>/dev/null)
+			
+			# Find the interface section associated with this radio
+			local iface_section=""
+			config_load wireless
+			find_iface() {
+				local section="$1"
+				local dev
+				config_get dev "$section" device
+				if [ "$dev" = "$device" ]; then
+					iface_section="$section"
+				fi
+			}
+			config_foreach find_iface wifi-iface
+			
+			# Create if missing
+			if [ -z "$iface_section" ]; then
+				iface_section=$(uci add wireless wifi-iface)
+				uci set wireless.$iface_section.device="$device"
+				uci set wireless.$iface_section.network="lan"
+			fi
+			
+			# Logic:
+			# Standard Mode: All radios -> AP
+			# Mesh Mode: 5G -> Mesh, 2.4G -> AP
+			local target_mode="ap"
+			if [ "$wifi_mode" = "mesh" ] && [ "$band" = "5g" ]; then
+				target_mode="mesh"
+			fi
+			
+			if [ "$target_mode" = "ap" ]; then
+				uci set wireless.$iface_section.mode='ap'
+				uci set wireless.$iface_section.ssid="$wifi_ssid"
+				uci set wireless.$iface_section.key="$wifi_key"
+				uci set wireless.$iface_section.encryption='psk2'
+				uci set wireless.$iface_section.disassoc_low_ack='0'
+				uci delete wireless.$iface_section.mesh_id 2>/dev/null
+			elif [ "$target_mode" = "mesh" ]; then
+				uci set wireless.$iface_section.mode='mesh'
+				uci set wireless.$iface_section.mesh_id="$mesh_id"
+				uci set wireless.$iface_section.encryption='none'
+				uci set wireless.$iface_section.mesh_fwding="$mesh_fwding"
+				uci set wireless.$iface_section.mesh_rssi_threshold="$mesh_rssi_threshold"
+				uci set wireless.$iface_section.disassoc_low_ack='0'
+				uci delete wireless.$iface_section.ssid 2>/dev/null
+				uci delete wireless.$iface_section.key 2>/dev/null
+			fi
+			
+			uci set wireless.$iface_section.disabled='0'
+		done
+		uci commit wireless
+	fi
+
+	# --- SYSTEM & SERVICES ---
+
+	# Hostname & Timezone
+	echo "$hostname" > /proc/sys/kernel/hostname
+	uci set system.@system[0].hostname="$hostname"
+	if [ "$timezone_africa_cairo" = "1" ]; then
+		uci set system.@system[0].timezone='EET-2EEST,M4.5.5/0,M10.5.4/24'
+		uci set system.@system[0].zonename='Africa/Cairo'
+	fi
+	uci commit system
+
+	# Firewall Offloading
+	uci set firewall.defaults.flow_offloading="$sw_offload"
+	uci set firewall.defaults.flow_offloading_hw="$hw_offload"
+	uci commit firewall
+
+	# BBR
+	if [ "$tcp_bbr" = "1" ]; then
+		if uci get turboacc.config >/dev/null 2>&1; then
+			uci set turboacc.config.bbr_cca='1'
+			uci commit turboacc
+		else
+			grep -q "bbr" /etc/sysctl.conf || echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+		fi
+	fi
+
+	# MT6000 Tweaks (rc.local)
+	if [ "$mt6000_tweaks" = "1" ]; then
+		cat << "EOF" > /etc/rc.local
+#!/bin/sh
+# MT6000 lowest-latency rc.local
+# 1. IRQ affinity
+for irq in 117 120 121; do
+    [ -e "/proc/irq/$irq/smp_affinity" ] || continue
+    case $irq in
+        117) mask=0008 ;; # cpu3
+        120) mask=0004 ;; # cpu2
+        121) mask=0002 ;; # cpu1
+    esac
+    printf '%s\n' "$mask" > "/proc/irq/$irq/smp_affinity"
+done
+# 2. RPS
+for dev in eth0 eth1 lan1 lan2 lan3 lan4 lan5; do
+    [ -e "/sys/class/net/$dev/queues/rx-0/rps_cpus" ] && \
+        printf '%x\n' 0xE > "/sys/class/net/$dev/queues/rx-0/rps_cpus"
+done
+# 3. XPS
+for dev in eth0 eth1; do
+    [ -e "/sys/class/net/$dev/queues/tx-0/xps_cpus" ] && \
+        printf '%x\n' 0xE > "/sys/class/net/$dev/queues/tx-0/xps_cpus"
+done
+exit 0
+EOF
+		chmod +x /etc/rc.local
+	fi
+
+	# Cake Autorate
+	if [ "$cake_autorate" = "1" ]; then
+		if uci get cake-autorate.config >/dev/null 2>&1; then
+			uci set cake-autorate.config.enabled='1'
+			uci commit cake-autorate
+			/etc/init.d/cake-autorate enable
+			/etc/init.d/cake-autorate start
+		fi
+	else
+		if uci get cake-autorate.config >/dev/null 2>&1; then
+			uci set cake-autorate.config.enabled='0'
+			uci commit cake-autorate
+			/etc/init.d/cake-autorate stop
+		fi
+	fi
+
+	# AdGuard Home
+	if [ "$dns_service" = "adguardhome" ]; then
+		cat << "EOF" > /etc/adguardhome.yaml
+http:
+  pprof:
+    port: 6060
+    enabled: true
+  address: 0.0.0.0:3000
+  session_ttl: 720h
+users:
+  - name: admin
+    password: $2y$10$.ujnc.Bphsaz4Z.SbOoMiux2z8DxpJUaIrD5gcITed.vKx.qrZSfC
+auth_attempts: 5
+block_auth_min: 15
+http_proxy: ""
+language: en
+theme: auto
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 53
+  anonymize_client_ip: false
+  ratelimit: 0
+  ratelimit_subnet_len_ipv4: 24
+  ratelimit_subnet_len_ipv6: 56
+  ratelimit_whitelist: []
+  refuse_any: true
+  upstream_dns:
+    - 213.131.65.20
+    - 213.131.66.246
+    - 4.2.2.2
+    - 4.2.2.3
+    - 4.2.2.5
+    - 8.8.4.4
+  upstream_dns_file: ""
+  bootstrap_dns:
+    - 9.9.9.10
+    - 149.112.112.10
+    - 2620:fe::10
+    - 2620:fe::fe:10
+  fallback_dns: []
+  upstream_mode: parallel
+  fastest_timeout: 1s
+  allowed_clients: []
+  disallowed_clients: []
+  blocked_hosts:
+    - version.bind
+    - id.server
+    - hostname.bind
+  trusted_proxies:
+    - 127.0.0.0/8
+    - ::1/128
+  cache_size: 2000000
+  cache_ttl_min: 3600
+  cache_ttl_max: 86400
+  cache_optimistic: true
+  bogus_nxdomain: []
+  aaaa_disabled: true
+  enable_dnssec: false
+  edns_client_subnet:
+    custom_ip: ""
+    enabled: false
+    use_custom: false
+  max_goroutines: 300
+  handle_ddr: true
+  ipset: []
+  ipset_file: ""
+  bootstrap_prefer_ipv6: false
+  upstream_timeout: 10s
+  private_networks: []
+  use_private_ptr_resolvers: false
+  local_ptr_upstreams: []
+  use_dns64: false
+  dns64_prefixes: []
+  serve_http3: false
+  use_http3_upstreams: false
+  serve_plain_dns: true
+  hostsfile_enabled: true
+tls:
+  enabled: false
+  server_name: ""
+  force_https: false
+  port_https: 8443
+  port_dns_over_tls: 853
+  port_dns_over_quic: 853
+  port_dnscrypt: 0
+  dnscrypt_config_file: ""
+  allow_unencrypted_doh: false
+  certificate_chain: ""
+  private_key: ""
+  certificate_path: ""
+  private_key_path: ""
+  strict_sni_check: false
+querylog:
+  dir_path: ""
+  ignored: []
+  interval: 2160h
+  size_memory: 1000
+  enabled: true
+  file_enabled: true
+statistics:
+  dir_path: ""
+  ignored: []
+  interval: 24h
+  enabled: true
+filters:
+  - enabled: false
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+    name: AdGuard DNS filter
+    id: 1
+  - enabled: false
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
+    name: AdAway Default Blocklist
+    id: 2
+  - enabled: false
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_51.txt
+    name: HaGeZi's Pro++ Blocklist
+    id: 1763343388
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_59.txt
+    name: AdGuard DNS Popup Hosts filter
+    id: 1763343389
+  - enabled: false
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_27.txt
+    name: OISD Blocklist Big
+    id: 1763343390
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_49.txt
+    name: HaGeZi's Ultimate Blocklist
+    id: 1763350814
+whitelist_filters: []
+user_rules: []
+dhcp:
+  enabled: true
+  interface_name: br-lan
+  local_domain_name: lan
+  dhcpv4:
+    gateway_ip: 192.168.55.1
+    subnet_mask: 255.255.255.0
+    range_start: 192.168.55.50
+    range_end: 192.168.55.250
+    lease_duration: 86400
+    icmp_timeout_msec: 1000
+    options: []
+  dhcpv6:
+    range_start: ""
+    lease_duration: 86400
+    ra_slaac_only: false
+    ra_allow_slaac: false
+filtering:
+  blocking_ipv4: ""
+  blocking_ipv6: ""
+  blocked_services:
+    schedule:
+      time_zone: UTC
+    ids: []
+  protection_disabled_until: null
+  safe_search:
+    enabled: false
+    bing: true
+    duckduckgo: true
+    ecosia: true
+    google: true
+    pixabay: true
+    yandex: true
+    youtube: true
+  blocking_mode: default
+  parental_block_host: family-block.dns.adguard.com
+  safebrowsing_block_host: standard-block.dns.adguard.com
+  rewrites: []
+  safe_fs_patterns:
+    - /tmp/lib/adguardhome/userfilters/*
+  safebrowsing_cache_size: 1048576
+  safesearch_cache_size: 1048576
+  parental_cache_size: 1048576
+  cache_time: 30
+  filters_update_interval: 24
+  blocked_response_ttl: 10
+  filtering_enabled: true
+  parental_enabled: false
+  safebrowsing_enabled: false
+  protection_enabled: true
+clients:
+  runtime_sources:
+    whois: true
+    arp: true
+    rdns: true
+    dhcp: true
+    hosts: true
+  persistent: []
+log:
+  enabled: true
+  file: ""
+  max_backups: 0
+  max_size: 100
+  max_age: 3
+  compress: false
+  local_time: false
+  verbose: false
+os:
+  group: ""
+  user: ""
+  rlimit_nofile: 0
+schema_version: 29
+EOF
+		/etc/init.d/adguardhome enable
+		/etc/init.d/adguardhome restart
+	fi
+
+	# Restart services
+	(sleep 15
+	 /etc/init.d/system restart
+	 /etc/init.d/network reload
+	 /etc/init.d/dnsmasq reload
+	 /etc/init.d/firewall reload 2>/dev/null)&
+}
+
+start() {
+	config_load wizard
+	config_foreach add_wizard wizard
+}
+
+restart() {
+	XRELOAD=1 start
+}
