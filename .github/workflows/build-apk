@@ -1,0 +1,79 @@
+name: Build OpenWrt 24.10 IPK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build luci-app-wizard (OpenWrt 24.10)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          path: package/luci-app-wizard
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev gawk git gettext libssl-dev xsltproc wget unzip python3
+
+      - name: Setup OpenWrt 24.10 SDK
+        run: |
+          # SDK URL for OpenWrt 24.10.4 (MediaTek Filogic)
+          # We use a wildcard for the gcc version to ensure it works even if minor versions bump
+          SDK_URL="https://downloads.openwrt.org/releases/24.10.4/targets/mediatek/filogic/"
+          
+          # Find the SDK filename dynamically (robust against GCC version changes)
+          SDK_FILE=$(curl -s $SDK_URL | grep -o 'openwrt-sdk-24.10.4-mediatek-filogic_gcc-[0-9.]*_musl.Linux-x86_64.tar.xz' | head -n 1)
+          
+          echo "Downloading SDK: $SDK_FILE"
+          wget "$SDK_URL$SDK_FILE"
+          
+          # Extract SDK
+          tar -xf "$SDK_FILE"
+          # Rename the dynamic directory name to 'sdk' for simplicity
+          mv openwrt-sdk-* sdk
+          
+      - name: Prepare Package
+        run: |
+          cd sdk
+          
+          # Update feeds (Crucial for 24.10 dependencies)
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+          # Link your package into the SDK
+          ln -s $GITHUB_WORKSPACE/package/luci-app-wizard package/luci-app-wizard
+          
+          # Configure to build your package
+          echo "CONFIG_PACKAGE_luci-app-wizard=m" > .config
+          make defconfig
+
+      - name: Compile Package
+        run: |
+          cd sdk
+          # Compile with verbose output to catch Lua/dependency errors
+          make package/luci-app-wizard/compile V=s
+
+      - name: Locate and Organize Artifacts
+        run: |
+          cd sdk
+          mkdir -p $GITHUB_WORKSPACE/output
+          
+          # Find the .ipk file. In 24.10, the path structure often includes the 'all' architecture for LuCI apps.
+          find bin/ -name "luci-app-wizard*.ipk" -exec cp {} $GITHUB_WORKSPACE/output/ \;
+          
+          echo "Build contents:"
+          ls -l $GITHUB_WORKSPACE/output/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-wizard-24.10-ipk
+          path: output/*.ipk
