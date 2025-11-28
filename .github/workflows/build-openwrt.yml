@@ -1,0 +1,108 @@
+diff --git a/.github/workflows/build-openwrt.yml b/.github/workflows/build-openwrt.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..2fe80692074d13b8c2812cf53a51a76261f13472
+--- /dev/null
++++ b/.github/workflows/build-openwrt.yml
+@@ -0,0 +1,102 @@
++name: Build OpenWrt IPK
++
++on:
++  push:
++    branches: [ main, master ]
++  pull_request:
++    branches: [ main, master ]
++  workflow_dispatch:
++    inputs:
++      release:
++        description: "OpenWrt release to use (e.g., 23.05.5)"
++        required: false
++        default: "23.05.5"
++      target:
++        description: "OpenWrt target/subtarget (e.g., mediatek/filogic)"
++        required: false
++        default: "mediatek/filogic"
++
++  jobs:
++    build:
++      name: Build luci-app-wizard for ${{ github.event.inputs.release || '23.05.5' }} (${{ github.event.inputs.target || 'mediatek/filogic' }})
++      runs-on: ubuntu-latest
++      env:
++        OPENWRT_RELEASE: ${{ github.event.inputs.release || '23.05.5' }}
++        OPENWRT_TARGET: ${{ github.event.inputs.target || 'mediatek/filogic' }}
++      defaults:
++        run:
++          shell: bash
++
++      steps:
++        - name: Checkout repository
++          uses: actions/checkout@v4
++
++        - name: Install build dependencies
++          run: |
++            sudo apt-get update
++            sudo apt-get install -y build-essential curl libncurses5-dev gawk gettext libssl-dev xsltproc wget unzip python3
++
++        - name: Download OpenWrt SDK
++          run: |
++            set -euo pipefail
++
++            TARGET_DIR="$OPENWRT_TARGET"
++            TARGET_FILE_PART="${OPENWRT_TARGET/\//-}"
++            SDK_URL="https://downloads.openwrt.org/releases/${OPENWRT_RELEASE}/targets/${TARGET_DIR}/"
++
++            SDK_FILE=$(curl -fsSL "$SDK_URL" | grep -o "openwrt-sdk-${OPENWRT_RELEASE}-${TARGET_FILE_PART}_gcc-[0-9.]*_musl.Linux-x86_64.tar.xz" | head -n 1)
++            if [[ -z "$SDK_FILE" ]]; then
++              echo "Unable to find SDK for $OPENWRT_RELEASE ($TARGET_DIR)" >&2
++              exit 1
++            fi
++
++            echo "Using SDK archive: $SDK_FILE"
++            wget "$SDK_URL$SDK_FILE"
++            tar -xf "$SDK_FILE"
++            mv openwrt-sdk-* sdk
++
++        - name: Prepare package inside SDK
++          run: |
++            set -euo pipefail
++            cd sdk
++
++            ./scripts/feeds update -a
++            ./scripts/feeds install -a
++
++            ln -s "$GITHUB_WORKSPACE/luci-app-wizard" package/luci-app-wizard
++
++            cat > .config <<'CONFIG'
++            CONFIG_PACKAGE_luci-app-wizard=m
++            CONFIG_ALL_KMODS=n
++            CONFIG_ALL_NONSHARED=n
++            CONFIG_DEVEL=y
++            CONFIG_SRC_TREE_OVERRIDE=y
++            CONFIG_BUILD_LOG=y
++            CONFIG_USE_MKLIBS=y
++            CONFIG_USE_STRIP=y
++            CONFIG
++
++            make defconfig
++
++        - name: Compile luci-app-wizard
++          run: |
+            set -euo pipefail
+            cd sdk
+            make package/luci-app-wizard/compile V=s
+
+        - name: Collect artifacts
+          run: |
+            set -euo pipefail
+            cd sdk
+
+            mkdir -p "$GITHUB_WORKSPACE/output"
+            find bin/ -name "luci-app-wizard*.ipk" -exec cp {} "$GITHUB_WORKSPACE/output/" \;
+
+            echo "Artifacts copied to $GITHUB_WORKSPACE/output:"
+            ls -l "$GITHUB_WORKSPACE/output"
+
+        - name: Upload IPK artifact
+          uses: actions/upload-artifact@v4
+          with:
+            name: luci-app-wizard-${{ env.OPENWRT_RELEASE }}-${{ env.OPENWRT_TARGET }}
+            path: output/*.ipk
