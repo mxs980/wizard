@@ -6,6 +6,13 @@
 'require rpc';
 'require form';
 
+var callInitAction = rpc.declare({
+	object: 'luci',
+	method: 'setInitAction',
+	params: ['name', 'action'],
+	expect: { result: false }
+});
+
 return view.extend({
 	load: function() {
 		return Promise.all([
@@ -167,6 +174,10 @@ return view.extend({
 
 		o = s.taboption('advanced', form.Flag, 'ipv6_enabled', _('Enable IPv6'));
 		o.default = '0';
+
+		m.on_after_commit = function() {
+			return callInitAction('wizard', 'restart');
+		};
 
 		return m.render();
 	}
