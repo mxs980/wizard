@@ -5,7 +5,8 @@
 			"uci": [ "wizard", "wireless" ]
 		},
 		"write": {
-			"uci": [ "wizard" ]
+			"uci": [ "wizard" ],
+			"luci": [ "setInitAction" ]
 		}
 	}
 }
